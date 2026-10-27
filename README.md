@@ -20,7 +20,7 @@ handling. Because the shadow insets become empty, the resize hit area falls back
 
 ## Requirements
 
-- HMCL CE / HMCL Neon `26.8` or newer
+- HMCL CE / HMCL Neon `26.8-beta` or newer
 - Java 17 or newer
 - A local HMCL jar for compilation (`HMCL_JAR` or `lib/HMCL-*.jar`)
 
@@ -31,7 +31,7 @@ export HMCL_JAR=/path/to/HMCL-CE-26.8-release.2.jar
 ./gradlew packageNpl
 ```
 
-The package is written to `build/npl/io.github.nixie24.disablewindowdecorator-v1.0.0.npl`.
+The package is written to `build/npl/io.github.nixie24.disablewindowdecorator-v1.0.1.npl`.
 Install it through HMCL's plugin manager and restart the launcher; Mixin changes are applied
 before the UI classes load.
 
