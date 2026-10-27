@@ -86,11 +86,13 @@ jobs:
           PACKAGE_SIZE: ${{ steps.pkg.outputs.size }}
         run: |
           $existing = $null
-          try {
-            $existing = gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/$env:RELEASE_TAG" | ConvertFrom-Json
-          } catch {
-            if ($LASTEXITCODE -ne 0) { $global:LASTEXITCODE = 0 }
+          # `gh api` writes the JSON error body to stdout on 404, so gate on the exit code
+          # instead of letting ConvertFrom-Json turn that body into a fake release object.
+          $releaseJson = gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/$env:RELEASE_TAG" 2>$null
+          if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($releaseJson)) {
+            $existing = $releaseJson | ConvertFrom-Json
           }
+          $global:LASTEXITCODE = 0
           if ($null -ne $existing -and -not [bool]$existing.draft) {
             throw 'A published release already exists for this tag; published NPL bytes are immutable.'
           }
