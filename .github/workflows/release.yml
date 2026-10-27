@@ -1,0 +1,174 @@
+name: Release HMCL CE Plugin
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to release (for example v1.0.0)'
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: hmclce-plugin-release-${{ github.repository }}
+  cancel-in-progress: false
+
+env:
+  HMCL_VERSION: 26.8-release.2
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+
+      - name: Resolve release tag
+        run: |
+          echo "RELEASE_TAG=${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}" >> "$GITHUB_ENV"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Download HMCL jar
+        run: |
+          set -euo pipefail
+          mkdir -p lib
+          curl -fsSL --retry 3 \
+            -o "lib/HMCL-CE-${HMCL_VERSION}.jar" \
+            "https://github.com/HMCL-Community/HMCL-Neon/releases/download/v${HMCL_VERSION}/HMCL-CE-${HMCL_VERSION}.jar"
+
+      - name: Build NPL
+        run: ./gradlew --no-daemon packageNpl
+
+      - name: Validate package and generate manifest
+        id: pkg
+        shell: pwsh
+        run: |
+          $packages = @(Get-ChildItem -Path build/npl -Filter *.npl -File -Recurse)
+          if ($packages.Count -ne 1) {
+            throw "Expected exactly one .npl package, found $($packages.Count)."
+          }
+          $package = $packages[0]
+          $version = $env:RELEASE_TAG -replace '^v', ''
+          $packageUrl = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$env:RELEASE_TAG/$($package.Name)"
+          ./tools/validate-npl.ps1 -Package $package.FullName
+          ./tools/sign-plugin.ps1 `
+            -Manifest ./manifest.template.json `
+            -Output ./manifest.json `
+            -Package $package.FullName `
+            -PackageUrl $packageUrl `
+            -Version $version `
+            -Community
+          ./tools/validate-npl.ps1 -Package $package.FullName -StoreManifest ./manifest.json
+          "file=$($package.FullName)" >> $env:GITHUB_OUTPUT
+          "name=$($package.Name)" >> $env:GITHUB_OUTPUT
+          "sha256=$((Get-FileHash -LiteralPath $package.FullName -Algorithm SHA256).Hash.ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+          "size=$($package.Length)" >> $env:GITHUB_OUTPUT
+
+      - name: Create or update draft release
+        id: draft
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PACKAGE_FILE: ${{ steps.pkg.outputs.file }}
+          PACKAGE_NAME: ${{ steps.pkg.outputs.name }}
+          PACKAGE_SHA256: ${{ steps.pkg.outputs.sha256 }}
+          PACKAGE_SIZE: ${{ steps.pkg.outputs.size }}
+        run: |
+          $existing = $null
+          try {
+            $existing = gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/$env:RELEASE_TAG" | ConvertFrom-Json
+          } catch {
+            if ($LASTEXITCODE -ne 0) { $global:LASTEXITCODE = 0 }
+          }
+          if ($null -ne $existing -and -not [bool]$existing.draft) {
+            throw 'A published release already exists for this tag; published NPL bytes are immutable.'
+          }
+          if ($null -eq $existing) {
+            gh release create $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --draft --title $env:RELEASE_TAG --notes 'Community release pending manifest publication.'
+            if ($LASTEXITCODE -ne 0) { throw 'Failed to create draft GitHub Release.' }
+          }
+          $release = gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/$env:RELEASE_TAG" | ConvertFrom-Json
+          $assets = @($release.assets | Where-Object { [string]$_.name -ceq $env:PACKAGE_NAME })
+          if ($assets.Count -gt 1) { throw 'Draft release contains duplicate NPL assets with the same name.' }
+          if ($assets.Count -eq 1) {
+            $asset = $assets[0]
+            if ([int64]$asset.size -ne [int64]$env:PACKAGE_SIZE) {
+              throw 'Existing NPL asset differs from the local package; refusing to replace immutable release bytes.'
+            }
+            $remoteAsset = Join-Path $env:RUNNER_TEMP "hmclce-existing-$($asset.id).npl"
+            Invoke-WebRequest `
+              -Uri "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/assets/$($asset.id)" `
+              -Headers @{
+                Accept = 'application/octet-stream'
+                Authorization = "Bearer $env:GH_TOKEN"
+                'X-GitHub-Api-Version' = '2022-11-28'
+              } `
+              -OutFile $remoteAsset
+            $remoteSha256 = (Get-FileHash -LiteralPath $remoteAsset -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($remoteSha256 -cne $env:PACKAGE_SHA256) {
+              throw 'Existing NPL asset differs from the local package; refusing to replace immutable release bytes.'
+            }
+            Write-Host "Reusing byte-identical draft NPL asset $($asset.id)."
+          } else {
+            gh release upload $env:RELEASE_TAG $env:PACKAGE_FILE --repo $env:GITHUB_REPOSITORY
+            if ($LASTEXITCODE -ne 0) { throw 'Failed to upload the NPL to the draft release.' }
+            $release = gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/$env:RELEASE_TAG" | ConvertFrom-Json
+            $assets = @($release.assets | Where-Object { [string]$_.name -ceq $env:PACKAGE_NAME })
+          }
+          if ($assets.Count -ne 1) { throw 'Draft release does not contain exactly one matching NPL asset.' }
+          "release_id=$($release.id)" >> $env:GITHUB_OUTPUT
+
+      - name: Upload release metadata
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload $env:RELEASE_TAG ./manifest.json --repo $env:GITHUB_REPOSITORY --clobber
+          if ($LASTEXITCODE -ne 0) { throw 'Failed to upload release metadata.' }
+
+      - name: Publish manifest on the default branch
+        shell: bash
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          generated_manifest="$RUNNER_TEMP/hmclce-manifest.json"
+          cp manifest.json "$generated_manifest"
+          git fetch origin "$DEFAULT_BRANCH"
+          git checkout -B "$DEFAULT_BRANCH" "origin/$DEFAULT_BRANCH"
+          cp "$generated_manifest" manifest.json
+          if git diff --quiet -- manifest.json; then
+            echo "Default-branch manifest is already current."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add manifest.json
+          git commit -m "Publish HMCL CE plugin ${RELEASE_TAG}"
+          git push origin "HEAD:$DEFAULT_BRANCH"
+
+      - name: Publish release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ steps.draft.outputs.release_id }}
+          PACKAGE_SHA256: ${{ steps.pkg.outputs.sha256 }}
+          PACKAGE_SIZE: ${{ steps.pkg.outputs.size }}
+        run: |
+          $notes = @(
+            "SHA-256: $env:PACKAGE_SHA256"
+            "Size: $env:PACKAGE_SIZE bytes"
+          ) -join "`n"
+          gh api --method PATCH "repos/$env:GITHUB_REPOSITORY/releases/$env:RELEASE_ID" -F draft=false -f body="$notes" | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw 'Failed to publish the release.' }

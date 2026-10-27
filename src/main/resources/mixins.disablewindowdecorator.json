@@ -1,0 +1,13 @@
+{
+  "required": true,
+  "minVersion": "0.8.7",
+  "package": "io.github.nixie24.hmcl.disablewindowdecorator.mixin",
+  "compatibilityLevel": "JAVA_17",
+  "mixins": [
+    "DecoratorMixin",
+    "MainWindowPaneMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}

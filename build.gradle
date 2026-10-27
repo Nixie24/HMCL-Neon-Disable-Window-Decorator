@@ -1,0 +1,51 @@
+plugins {
+    id 'java'
+}
+
+group = 'io.github.nixie24'
+version = '1.0.0'
+
+repositories {
+    mavenCentral()
+    maven { url = uri('https://repo.spongepowered.org/repository/maven-public/') }
+}
+
+// HMCL is not published to a Maven repository, so the plugin compiles against a local jar.
+// Set HMCL_JAR, or drop an HMCL-*.jar into lib/.
+def hmclJarPath = System.getenv('HMCL_JAR')
+def hmclJar = hmclJarPath ? file(hmclJarPath) : null
+if (hmclJar == null) {
+    def candidates = fileTree('lib') { include 'HMCL-*.jar' }.files
+    if (!candidates.isEmpty()) {
+        hmclJar = candidates.max { it.lastModified() }
+    }
+}
+if (hmclJar == null || !hmclJar.exists()) {
+    throw new GradleException('HMCL jar not found. Set HMCL_JAR or place an HMCL-*.jar in lib/.')
+}
+
+dependencies {
+    compileOnly files(hmclJar)
+    compileOnly 'org.spongepowered:mixin:0.8.7'
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.release = 17
+    options.encoding = 'UTF-8'
+    // Mixin annotations are read at runtime; the annotation processor is not used.
+    options.compilerArgs += ['-proc:none']
+}
+
+tasks.jar {
+    archiveBaseName = 'disable-window-decorator'
+}
+
+tasks.register('packageNpl', Zip) {
+    dependsOn tasks.jar
+    archiveFileName = "io.github.nixie24.disablewindowdecorator-v${project.version}.npl"
+    destinationDirectory = layout.buildDirectory.dir('npl')
+    from('plugin.json')
+    into('libs') {
+        from(tasks.jar)
+    }
+}

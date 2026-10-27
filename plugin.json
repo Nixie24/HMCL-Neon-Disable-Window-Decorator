@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 4,
+  "id": "io.github.nixie24.disablewindowdecorator",
+  "name": "Disable Window Decorator",
+  "version": "1.0.0",
+  "description": "Removes HMCL Neon's custom window shadow, outer padding and rounded corners for a borderless, square, transparent window.",
+  "author": "Nixie24",
+  "type": "java",
+  "entrypoint": "io.github.nixie24.hmcl.disablewindowdecorator.DisableWindowDecoratorPlugin",
+  "dependencies": [],
+  "permissions": ["mixin"],
+  "requiredPermissions": ["mixin"],
+  "launcherVersion": ">=26.8",
+  "mixins": [
+    "mixins.disablewindowdecorator.json"
+  ]
+}
