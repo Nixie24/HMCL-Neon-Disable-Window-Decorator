@@ -111,17 +111,17 @@ jobs:
           fi
 
           if [ -z "$release" ]; then
-            gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft \
-              --title "$RELEASE_TAG" --notes 'Community release pending manifest publication.'
-            fetch_releases
-            release="$(find_release)"
+            # Create through the REST API: the response is the new release itself, so
+            # this does not depend on the release list catching up (it is eventually
+            # consistent, which made a just-created draft look missing).
+            release="$(gh api --method POST "repos/$GITHUB_REPOSITORY/releases" \
+              -f tag_name="$RELEASE_TAG" \
+              -f name="$RELEASE_TAG" \
+              -F draft=true \
+              -f body='Community release pending manifest publication.')"
           fi
 
-          if [ -z "$release" ]; then
-            echo "::error::Draft release for $RELEASE_TAG was not found after creation."
-            exit 1
-          fi
-
+          release_id="$(jq -r '.id' <<<"$release")"
           count="$(asset_count "$release")"
           if [ "$count" -gt 1 ]; then
             echo "::error::Draft release contains duplicate NPL assets named $PACKAGE_NAME."
@@ -146,21 +146,23 @@ jobs:
             echo "Reusing byte-identical draft NPL asset $asset_id."
           else
             gh release upload "$RELEASE_TAG" "$PACKAGE_FILE" --repo "$GITHUB_REPOSITORY"
-            fetch_releases
-            release="$(find_release)"
-            if [ -z "$release" ]; then
-              echo "::error::Draft release disappeared after uploading the NPL."
+            assets_json="$RUNNER_TEMP/hmclce-assets.json"
+            count=0
+            for attempt in $(seq 1 10); do
+              gh api "repos/$GITHUB_REPOSITORY/releases/$release_id/assets" > "$assets_json"
+              count="$(jq --arg name "$PACKAGE_NAME" '[.[] | select(.name == $name)] | length' "$assets_json")"
+              if [ "$count" -eq 1 ]; then
+                break
+              fi
+              sleep 3
+            done
+            if [ "$count" -ne 1 ]; then
+              echo "::error::NPL asset did not appear on release $release_id after upload."
               exit 1
             fi
-            count="$(asset_count "$release")"
           fi
 
-          if [ "$count" -ne 1 ]; then
-            echo "::error::Draft release does not contain exactly one NPL asset named $PACKAGE_NAME."
-            exit 1
-          fi
-
-          echo "release_id=$(jq -r '.id' <<<"$release")" >> "$GITHUB_OUTPUT"
+          echo "release_id=$release_id" >> "$GITHUB_OUTPUT"
 
       - name: Upload release metadata
         shell: bash
