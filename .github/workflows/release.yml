@@ -85,22 +85,24 @@ jobs:
           PACKAGE_SHA256: ${{ steps.pkg.outputs.sha256 }}
           PACKAGE_SIZE: ${{ steps.pkg.outputs.size }}
         run: |
-          $existing = $null
-          # `gh api` writes the JSON error body to stdout on 404, so gate on the exit code
-          # instead of letting ConvertFrom-Json turn that body into a fake release object.
-          $releaseJson = gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/$env:RELEASE_TAG" 2>$null
-          if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($releaseJson)) {
-            $existing = $releaseJson | ConvertFrom-Json
+          # Draft releases are not returned by /releases/tags/{tag}; list releases instead.
+          function Get-ReleaseByTag([string]$Tag) {
+            $json = gh api "repos/$env:GITHUB_REPOSITORY/releases?per_page=100"
+            if ($LASTEXITCODE -ne 0) { throw 'Failed to list GitHub Releases.' }
+            return @($json | ConvertFrom-Json | Where-Object { [string]$_.tag_name -ceq $Tag }) | Select-Object -First 1
           }
-          $global:LASTEXITCODE = 0
+
+          $existing = Get-ReleaseByTag $env:RELEASE_TAG
           if ($null -ne $existing -and -not [bool]$existing.draft) {
             throw 'A published release already exists for this tag; published NPL bytes are immutable.'
           }
           if ($null -eq $existing) {
             gh release create $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --draft --title $env:RELEASE_TAG --notes 'Community release pending manifest publication.'
             if ($LASTEXITCODE -ne 0) { throw 'Failed to create draft GitHub Release.' }
+            $existing = Get-ReleaseByTag $env:RELEASE_TAG
           }
-          $release = gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/$env:RELEASE_TAG" | ConvertFrom-Json
+          if ($null -eq $existing) { throw 'Draft release was not found after creation.' }
+          $release = $existing
           $assets = @($release.assets | Where-Object { [string]$_.name -ceq $env:PACKAGE_NAME })
           if ($assets.Count -gt 1) { throw 'Draft release contains duplicate NPL assets with the same name.' }
           if ($assets.Count -eq 1) {
@@ -125,7 +127,8 @@ jobs:
           } else {
             gh release upload $env:RELEASE_TAG $env:PACKAGE_FILE --repo $env:GITHUB_REPOSITORY
             if ($LASTEXITCODE -ne 0) { throw 'Failed to upload the NPL to the draft release.' }
-            $release = gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/$env:RELEASE_TAG" | ConvertFrom-Json
+            $release = Get-ReleaseByTag $env:RELEASE_TAG
+            if ($null -eq $release) { throw 'Draft release disappeared after uploading the NPL.' }
             $assets = @($release.assets | Where-Object { [string]$_.name -ceq $env:PACKAGE_NAME })
           }
           if ($assets.Count -ne 1) { throw 'Draft release does not contain exactly one matching NPL asset.' }

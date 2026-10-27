@@ -36,6 +36,13 @@ tasks.withType(JavaCompile).configureEach {
     options.compilerArgs += ['-proc:none']
 }
 
+// Keep repeated builds byte-identical so a failed release can be retried against the
+// same draft asset without tripping the immutable-bytes check.
+tasks.withType(AbstractArchiveTask).configureEach {
+    preserveFileTimestamps = false
+    reproducibleFileOrder = true
+}
+
 tasks.jar {
     archiveBaseName = 'disable-window-decorator'
 }
